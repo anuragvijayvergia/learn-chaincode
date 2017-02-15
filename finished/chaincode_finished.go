@@ -1,30 +1,32 @@
-/*
-Copyright IBM Corp 2016 All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-		 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/hyperledger/fabric/core/chaincode/shim"
 )
 
 // SimpleChaincode example simple Chaincode implementation
 type SimpleChaincode struct {
+}
+
+type Poll struct {
+	id       string   `json:"id"`
+	title    string   `json:"title"`
+	question string   `json:"question"`
+	isOpen   bool     `json:"isOpen"`
+	maxVotes int      `json:"maxVotes"`
+	options  []string `json:"options"`
+	votes    []Vote   `json:"votes"`
+	owner    string   `json:"owner"`
+}
+
+type Vote struct {
+	option string `json:"selectedOption"`
+	user   string `json:"voteBy"`
 }
 
 func main() {
@@ -36,15 +38,6 @@ func main() {
 
 // Init resets all the things
 func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
-	if len(args) != 1 {
-		return nil, errors.New("Incorrect number of arguments. Expecting 1")
-	}
-
-	err := stub.PutState("hello_world", []byte(args[0]))
-	if err != nil {
-		return nil, err
-	}
-
 	return nil, nil
 }
 
@@ -55,9 +48,12 @@ func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface, function stri
 	// Handle different functions
 	if function == "init" {
 		return t.Init(stub, "init", args)
-	} else if function == "write" {
-		return t.write(stub, args)
+	} else if function == "createPoll" {
+		return t.createPoll(stub, args)
+	} else if function == "vote" {
+		return t.vote(stub, args)
 	}
+
 	fmt.Println("invoke did not find func: " + function)
 
 	return nil, errors.New("Received unknown function invocation: " + function)
@@ -68,48 +64,110 @@ func (t *SimpleChaincode) Query(stub shim.ChaincodeStubInterface, function strin
 	fmt.Println("query is running " + function)
 
 	// Handle different functions
-	if function == "read" { //read a variable
-		return t.read(stub, args)
-	}
+	// if function == "getVoteCount" {
+	// 	return t.getVoteCount(stub, args)
+	// } else if function == "getVotes" {
+	// 	return t.getVotes(stub, args)
+	// }
 	fmt.Println("query did not find func: " + function)
 
 	return nil, errors.New("Received unknown function query: " + function)
 }
 
-// write - invoke function to write key/value pair
-func (t *SimpleChaincode) write(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
-	var key, value string
+func (t *SimpleChaincode) createPoll(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
 	var err error
-	fmt.Println("running write()")
 
-	if len(args) != 2 {
-		return nil, errors.New("Incorrect number of arguments. Expecting 2. name of the key and value to set")
+	username, err := stub.ReadCertAttribute("username")
+	if err != nil {
+		return nil, errors.New("Failed to get username")
+	}
+	usernameStr := string(username)
+	if usernameStr != "admin" {
+		return nil, errors.New("Only admin can create poll")
+	}
+	if len(args) < 6 {
+		return nil, errors.New("Minimum 6 arguments are need to create poll. Viz. id,title,question,maxVotes,option1,option2,option3(optional options followed)")
+	}
+	id := args[0]
+	//check if id already exists
+	pollAsByte, err := stub.GetState(id)
+	if err != nil {
+		return nil, errors.New("Failed to get poll with id as " + id)
 	}
 
-	key = args[0] //rename for funsies
-	value = args[1]
-	err = stub.PutState(key, []byte(value)) //write the variable into the chaincode state
+	res := Poll{}
+	json.Unmarshal(pollAsByte, &res)
+	if res.id == id {
+		return nil, errors.New("Id already exisit")
+	}
+	//str := `{"id":"` + id + `","title":"` + title + `","question":"` + question + `","isOpen":"` + isOpen + `","maxVotes":"` + maxVotes + `","options":"` + options + `","votes":"` + votes + `","owner":"` + username + `"}`
+
+	newPoll := Poll{}
+	newPoll.id = id
+	newPoll.title = args[1]
+	newPoll.question = args[2]
+	newPoll.maxVotes, err = strconv.Atoi(args[3])
+	if err != nil {
+		return nil, errors.New("4th Argument i.e max votes must be numeric string")
+	}
+	newPoll.isOpen = true
+	// for i := 4; i < len(args); i++ {
+	// 	newPoll.options = append(options, args[i])
+	// }
+	newPoll.owner = usernameStr
+
+	newPollAsByte, _ := json.Marshal(newPoll)
+
+	err = stub.PutState(id, newPollAsByte)
 	if err != nil {
 		return nil, err
 	}
 	return nil, nil
 }
 
-// read - query function to read key/value pair
-func (t *SimpleChaincode) read(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
-	var key, jsonResp string
+func (t *SimpleChaincode) vote(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
 	var err error
-
-	if len(args) != 1 {
-		return nil, errors.New("Incorrect number of arguments. Expecting name of the key to query")
+	if len(args) != 2 {
+		return nil, errors.New("2 arguments are need to vote. Viz. id of poll,choice")
 	}
-
-	key = args[0]
-	valAsbytes, err := stub.GetState(key)
+	username, err := stub.ReadCertAttribute("username")
 	if err != nil {
-		jsonResp = "{\"Error\":\"Failed to get state for " + key + "\"}"
-		return nil, errors.New(jsonResp)
+		return nil, errors.New("Failed to get username")
+	}
+	usernameStr := string(username)
+	id := args[0]
+	pollAsByte, err := stub.GetState(id)
+	if err != nil {
+		return nil, errors.New("Failed to get poll with id as " + id)
+	}
+	res := Poll{}
+	json.Unmarshal(pollAsByte, &res)
+	if res.id != id {
+		return nil, errors.New("Poll id not found")
+	}
+	if res.isOpen == false {
+		return nil, errors.New("Poll ended")
+	}
+	isValidOption := false
+	for i := 0; i < len(res.options); i++ {
+		if res.options[i] == args[1] {
+			isValidOption = true
+		}
+	}
+	if isValidOption == false {
+		return nil, errors.New("Not a valid option")
 	}
 
-	return valAsbytes, nil
+	newVote := Vote{}
+	newVote.option = args[1]
+	newVote.user = usernameStr
+
+	res.votes = append(res.votes, newVote)
+	pollAsByte, _ = json.Marshal(res)
+	err = stub.PutState(id, pollAsByte)
+	if err != nil {
+		return nil, err
+	}
+
+	return nil, nil
 }
